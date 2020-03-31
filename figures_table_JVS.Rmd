@@ -1,0 +1,484 @@
+```{r loadpackages, message = FALSE}
+
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(cowplot)
+library(broom)
+library(here)
+library(raster)
+
+```
+
+```{r load_data}
+
+load("Trindade_et_al_JVS.RData")
+
+```
+
+## Anova
+
+```{r aov}
+
+aov.cwm <- cwmpp %>% 
+  #dplyr::select(Ontogeny, starts_with("cwm"), -contains("log")) %>%
+  gather(key = "trait", value = "value", -Ontogeny)%>% 
+  group_by(trait) %>% 
+  nest() %>% 
+  mutate(model = purrr::map(data, ~aov(value ~ Ontogeny, data=.x)),
+    coefs = purrr::map(model, tidy, conf.int = F)) %>% 
+  unnest(coefs) #%>% 
+  #filter(adj.p.value <= 0.05)
+
+tukey.cwm <- cwmpp %>% 
+  #dplyr::select(Ontogeny, starts_with("cwm"), -contains("log")) %>% 
+  gather(key = "trait", value = "value", -Ontogeny)%>% 
+  group_by(trait) %>% 
+  nest() %>% 
+  mutate(model = purrr::map(data, ~TukeyHSD(aov(value ~ Ontogeny, data=.x))),
+    coefs = purrr::map(model, tidy, conf.int = F)) %>% 
+  unnest(coefs) #%>% 
+  #filter(adj.p.value <= 0.05)
+
+
+```
+
+
+```{r model.cwm}
+
+model.cwm <- allpool %>% 
+  dplyr::select(plot,GMDI,prec, Ontogeny, starts_with("cwm"), -contains("log")) %>% 
+  rename(SM = cwm.sm, Hmax = cwm.hmax, LT = cwm.esp, WD = cwm.wood, LDMC = cwm.ldmc, SLA = cwm.sla, MDD = cwm.dist, Succession = plot, CAD = GMDI, Rainfall = prec) %>% 
+  gather(key = "trait", value = "value",-Succession,-CAD,-Rainfall, -Ontogeny)%>% 
+  group_by(trait,Ontogeny) %>% 
+  replace(., is.na(.),0) %>% 
+  nest() %>% 
+  mutate(model = purrr::map(data, ~lm(value ~ Succession + Rainfall + CAD , data=.x)),
+         coefs = purrr::map(model, tidy),
+         Rsq = purrr::map_dbl(model, ~summary(.)$r.sq)) %>% 
+  unnest(coefs) %>% 
+  #filter(!term == "(Intercept)", p.value <= 0.05) %>% 
+  arrange(Ontogeny) %>% split(.$Ontogeny) #%>% map(~ .x %>% dplyr::select(-Ontogeny))
+
+
+
+```
+
+
+```{r model.ses}
+
+model.ses <- allpool %>% 
+  dplyr::select(plot,GMDI,prec, Ontogeny, starts_with("ses"), -contains("log")) %>% 
+  rename(SES.SM = ses.sm, SES.Hmax = ses.hmax, SES.LT = ses.esp, SES.WD = ses.wood, SES.LDMC = ses.ldmc, SES.SLA = ses.sla, SES.MDD = ses.dist, Succession = plot, CAD = GMDI, Rainfall = prec) %>% 
+  gather(key = "trait", value = "value",-Succession,-CAD,-Rainfall, -Ontogeny)%>% 
+  group_by(trait,Ontogeny) %>% 
+  nest() %>% 
+  mutate(model = purrr::map(data, ~lm(value ~ Succession + Rainfall + CAD, data=.x)),
+         coefs = purrr::map(model, tidy, conf.int = F),
+         Rsq = purrr::map_dbl(model, ~summary(.)$r.sq)) %>% 
+  unnest(coefs) %>% 
+  arrange(Ontogeny)%>% split(.$Ontogeny) %>% purrr::map(~ .x %>% dplyr::select(-Ontogeny))
+
+
+
+```
+
+```{r map, fig.height= 10, fig.width = 18, dpi = 300, fig.cap = "Study site location in northeast Brazil, in the Catimbau National Park. The raster color depicts the precipitaiton gradient. Points represent secondary succession sites (black) and old-growth forests (grey). Size of points represent the CAD gradient. The x and y axes are the longitude and latitudes coordinates, respectively."}
+
+amb <- read.csv(here("maps", "var_amb.csv"),  header = T, sep = ";") %>% 
+  rename(Precipitation = ppt_novo, CAD = GMDI.xavi, Forest = gradiente) %>%
+  mutate(Forest = case_when(Forest == "controle" ~ "Old-Growth",
+                            Forest == "regeneracao" ~ "Secondary"))
+
+
+mapat <- borders("world", regions =".", c(-85, -35), ylim=c(-55,12), fill = "black", colour = "black")
+
+
+mapa <- borders("world", regions = "Brazil", fill = "grey70", colour = "white")
+
+brazil <- ggplot() + mapat + theme_void() +
+  mapa
+
+
+# filter Pernambuco state
+
+estados <- shapefile(here("maps", "BRA_adm1.shp"))
+estados1 <- fortify(estados)
+
+estados2<-estados1 %>% dplyr::filter(id == 16) 
+
+# catimbau's shapefile
+
+catimbau <- shapefile(here("maps", "catimb.shp"))
+catimb <- fortify(catimbau)
+
+
+# Latinamerican map, higlighting Brazil and Pernambuco
+
+br_est <- brazil + geom_path(data = estados1, aes(x = long, y = lat, group = group), colour = "white")+
+  geom_polygon(data = estados2, aes(x = long, y = lat, group = group), fill = "red", colour = "black")+
+  theme_void()+
+  geom_polygon(data = catimb, aes(x = long, y = lat, group = group), fill = "black", colour = "white")
+
+#
+
+mapa2 <- borders("world", regions = "Brazil", fill = "gray95", colour = "black")
+
+brazil2 <- ggplot() + mapa2 + theme_bw() + xlab("Longitude (decimals)") + ylab("Latitude (decimals)")
+
+
+### creating a raster for precipitation
+
+points <- amb %>% dplyr::select(long,lat)
+coordinates(points) = ~long+lat
+proj4string(points) <- CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+# get worldclim data
+
+#r <- getData("worldclim",var="bio",res=0.5, lon =-41.6, lat = -10 )
+#prec <- crop(r[[12]], extent(-37.58, -37.15,-8.7, -8.2))
+
+spdf <- as(prec, "SpatialPixelsDataFrame")
+raster.prec <- as.data.frame(spdf) %>% 
+  rename(Precipitation = bio12_34)
+
+##############################
+##############################
+
+# map catimbau
+
+zoomcat <- brazil2 + 
+  geom_tile(data=raster.prec, aes(x=x, y=y, fill=Precipitation), alpha=0.8) + 
+  coord_map(xlim=c(-37.57, -37.18), ylim=c(-8.67, -8.385))+
+  scale_fill_distiller(palette = "Spectral",direction = 1)+
+  geom_path(data = catimb, aes(x = long, y = lat, group = group), colour = "red",size=1.5)+
+  geom_point(data=amb, aes(long, lat, size = CAD, colour = Forest))+
+  scale_color_manual(values=c("grey60", "black"))+
+  scale_size_continuous(range = c(1, 6))+
+    ggrepel::geom_label_repel(data=amb, size=5, alpha = .7, box.padding = unit(0.4, "lines"), segment.size = .3, point.padding = unit(0.5, "lines"), aes(x = long, y = lat,label=forest))+
+  theme(legend.title=element_text(size=18))
+                    
+
+#get legend
+
+legendmap<-get_legend(zoomcat)
+
+
+zoomcat2 <- zoomcat  + 
+  theme(legend.position = "none")
+
+###
+
+map_catimbau <-plot_grid(br_est, zoomcat2, legendmap, ncol=3,
+                rel_widths = c(1,1,.2), 
+                labels = c("(a)", "(b)"), label_size = 20)
+
+#map_catimbau
+
+ggsave(here("maps", "map_fig1.png"), map_catimbau, dpi=300, height = 13, width = 20)
+
+```
+
+
+```{r fig2, fig.cap="Overall CWM across ontogenetic stages (seeds, seedlings and adults) in the Catimbau National Park, Brazil. Different letters depict significant differences. WD = wood density (g/cm^3^), SM = seed mass (log(mg)), MH = maximum height (m). See Supplementary material for more detailed graphs, including all traits examined."}
+
+cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+cwm.plot <- cwmpp %>% 
+  gather(key = "trait", value = "value", -Ontogeny)%>% 
+  group_by(trait) %>% 
+  mutate(Ontogeny = fct_relevel(Ontogeny, 
+            "propag", "seedlings", "adults")) %>%
+  replace(., is.na(.),0) %>% 
+  nest() %>% 
+  mutate(plot.cwm = map2(data, trait, ~ ggplot(data = .x,  aes(x = Ontogeny, y=value, colour=Ontogeny)) + 
+                                 geom_boxplot(pch=16) + geom_jitter() + scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)))
+
+
+
+leg<-cwm.plot$plot.cwm[[1]] + labs(y = "CWM Seed mass", x= "Ontogeny", color = "Ontogeny")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+getleg<-get_legend(leg)
+
+
+
+cwmhm<-cwm.plot$plot.cwm[[1]] + labs(y = "MH", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+  scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)+
+  ylim(4,13) 
+
+
+
+cwmesp<-cwm.plot$plot.cwm[[2]] + labs(y = "LT", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+
+
+cwmwd<-cwm.plot$plot.cwm[[3]] + labs(y = "WD", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)+
+  ylim(0.3,1.1) + 
+  annotate("text", label = "a", size=5, x = 1, y = .9, color = "black") +
+  annotate("text", label = "b", size=5, x = 2, y = .9, color = "black")+
+  annotate("text", label = "ab", size=5, x = 3, y = .9, color = "black")
+
+
+cwmldmc<-cwm.plot$plot.cwm[[4]] + labs(y = "LDMC", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+ theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+
+cwmsla<-cwm.plot$plot.cwm[[5]] + labs(y = "SLA", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+
+
+cwmmdd<-cwm.plot$plot.cwm[[6]] + labs(y = "MDD", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+
+
+cwmsm<-cwm.plot$plot.cwm[[7]] + labs(y = "SM", x= "Ontogeny", color = "Ontogeny")  + scale_x_discrete(labels = c("Seeds",  "Seedlings", "Adults"))+theme(legend.position = "none")+
+   scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)+
+  ylim(0,2.7)+ 
+  annotate("text", label = "a", size=5, x = 1, y = 2.4, color = "black") +
+  annotate("text", label = "b", size=5, x = 2, y = 2.4, color = "black")+
+  annotate("text", label = "b", size=5, x = 3, y = 2.4, color = "black")
+
+
+fig2<-plot_grid(cwmwd,cwmsm, ncol=2,nrow=1, labels = c('(a)', '(b)',"(c)"), align = "hv")
+
+fig2
+
+#ggsave(here("figs",file = "fig1.png"), fig1, units= "in", height=7,width=12,  dpi = 600)
+
+
+
+```
+
+
+```{r fig3, fig.cap = "Changes in CWM across ontogenies (seeds, seedlings and adults) along both rainfall (a) and CAD gradient (b) in Caatinga dry forest in Brazil. Only significant models were plotted. Highlighted lines depict significant relationships. Lines were fitted using a linear regression. WD = wood density (g/cm3), SM = seed mass (log(mg)), MDD = maximum dispersal distance (log(m)). See Supplementary material for more detailed graphs, including all traits examined and gradients."}
+
+get_leg <- allpool %>% 
+  dplyr::select(plot,GMDI,prec, Ontogeny, starts_with("ses"), -contains("log")) %>% 
+        gather(key = "trait", value = "value",-plot,-GMDI,-prec, -Ontogeny)%>% 
+        group_by(trait) %>%
+        mutate(Ontogeny = fct_relevel(Ontogeny, 
+            "Seeds", "Seedlings", "Adults")) %>%
+  ggplot(data = .,  aes(x = prec, y=value, colour=Ontogeny)) + 
+                                 geom_point(alpha=1,pch=16)+
+    scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)
+
+get_leg2 <- get_legend(get_leg)
+
+trait.plot <- allpool %>% 
+        dplyr::select(plot,GMDI,prec, Ontogeny, starts_with("cwm"), -contains("log")) %>% 
+        gather(key = "trait", value = "value",-plot,-GMDI,-prec, -Ontogeny)%>% 
+        group_by(trait) %>%
+        mutate(Ontogeny = fct_relevel(Ontogeny, 
+            "Seeds", "Seedlings", "Adults")) %>%
+        nest() %>% 
+        mutate(plot.prec = map2(data, trait, ~ ggplot(data = .x,  aes(x = prec, y=value, colour=Ontogeny, fill=Ontogeny)) + 
+                                 geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)),
+               
+               plot.GMDI = map2(data, trait, ~ ggplot(data = .x,  aes(x = GMDI, y=value, colour=Ontogeny)) + 
+                                  geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)),
+               
+               plot.succ = map2(data, trait, ~ ggplot(data = .x,  aes(x = plot, y=value, colour=Ontogeny)) + 
+                                  geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)))
+
+
+
+prec.adult.wd<-trait.plot$plot.prec[[3]] + theme( axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+                            scale_alpha_manual(values = c(.1,.1, 1))+
+                            labs(y="WD", x = "Rainfall gradient")+theme(legend.position = "none")+
+  annotate("text", label = "Rsq = 0.53", size=3.5, x = 610, y = 0.787, color = "black")
+
+
+prec.adult.sm<-trait.plot$plot.prec[[7]] +  geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+                            scale_alpha_manual(values = c(.1, .1,1))+
+                            labs(y="SM", x = "Rainfall gradient")+theme(legend.position = "none")+
+  annotate("text", label = "Rsq = 0.73", size=3.5, x = 610, y = 2.45, color = "black")
+
+
+
+prec.seed.mdd<-trait.plot$plot.prec[[6]] + theme(axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+                            scale_alpha_manual(values = c(1, .1,.1))+
+                            labs(y="MDD", x = "Rainfall gradient")+theme(legend.position = "none")+
+  annotate("text", label = "Rsq = 0.75", size=3.5, x = 610, y = 2.5, color = "black")
+
+cad.seed.mdd<-trait.plot$plot.GMDI[[6]] + geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+                            scale_alpha_manual(values = c(1, .1,.1))+
+                            labs(y="MDD", x = "CAD gradient")+
+  annotate("text", label = "Rsq = 0.75", size=3.5, x = 10, y = 2.5, color = "black")+ theme(legend.position = "none")
+
+
+
+fig2<-plot_grid(prec.adult.wd, prec.adult.sm, prec.seed.mdd, nrow=1,
+                labels="(a)", align = "h",hjust=0)
+
+
+figcad <- plot_grid(NULL, cad.seed.mdd,NULL, ncol=3, labels = "(b)", rel_widths = c(1,1,1), align = "h",hjust=0)
+
+fig2.1<-plot_grid(fig2,figcad,nrow=2)
+fig2.2<-plot_grid(fig2.1, get_leg2, rel_widths = c(1,.2))
+
+fig2.2
+
+#ggsave(here("figs",file = "fig2.png"), fig2.2, units= "in", height=7,width=12,  dpi = 600)
+
+```
+
+```{r fig3, fig.cap = "Changes in SESRao for each ontogeny along both rainfall (a) and CAD gradient (b) in Caatinga dry forest in Brazil. Only significant models were plotted. Highlighted lines depict significant relationships and only significant models were ploted. Lines were fitted using a linear regression. WD = wood density (g/cm3). See Supplementary material for more detailed graphs, including all traits examined and gradients."}
+
+
+
+  ses.plot <- allpool %>% 
+        dplyr::select(plot,GMDI,prec, Ontogeny, starts_with("ses"), -contains("log")) %>% 
+        gather(key = "trait", value = "value",-plot,-GMDI,-prec, -Ontogeny)%>% 
+        group_by(trait) %>%
+        mutate(Ontogeny = fct_relevel(Ontogeny, 
+            "Seeds", "Seedlings", "Adults")) %>%
+        nest() %>% 
+        mutate(plot.prec = map2(data, trait, ~ ggplot(data = .x,  aes(x = prec, y=value, colour=Ontogeny)) + 
+                                 geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)),
+               
+               plot.GMDI = map2(data, trait, ~ ggplot(data = .x,  aes(x = GMDI, y=value, colour=Ontogeny)) + 
+                                  geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)),
+               
+               plot.succ = map2(data, trait, ~ ggplot(data = .x,  aes(x = plot, y=value, colour=Ontogeny)) + 
+                                  geom_point(alpha=.2,pch=16)+scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)))
+
+
+prec.adult.woodses<-ses.plot$plot.prec[[3]] + geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_hline(yintercept = 0, lty="dashed", size=1.4, colour="grey",alpha=.5)+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+  scale_color_manual(name="Ontogeny",
+                     labels=c("Seeds",  "Seedlings", "Adults"),
+                     values = cbp1)+
+                            scale_alpha_manual(values = c(1,1,1))+
+                            labs(y="SES Wood density", x = "Rainfall gradient")
+
+
+
+
+prec.adult.woodses<-ses.plot$plot.prec[[3]] + theme(legend.position="none")+geom_line(aes(alpha=Ontogeny), size = 1, stat = "smooth", method = "lm")+
+                            geom_hline(yintercept = 0, lty="dashed", size=1.4, colour="grey",alpha=.5)+
+                            geom_point(aes(alpha=Ontogeny), size = 2)+
+                            scale_alpha_manual(values = c(.1,1, 1))+
+                            labs(y="SESRao WD", x = "Rainfall gradient")
+
+
+fig3 <- plot_grid(prec.adult.woodses, get_leg2, rel_widths = c(1,.2))
+fig3
+# ggsave(here("figs",file = "fig3.png"), fig3, units= "in", height=7,width=12,  dpi = 600)
+
+```
+
+# Tables
+
+```{r tab1}
+
+library(kableExtra)
+
+text_tbl <- data.frame(
+  Trait = c("Maximum Height (MH)","Seed Mass (SM)","Wood Density (WD)", "Specific Leaf Area (SLA)","Leaf Dry Matter Content (LDMC)", "Leaf Thickness (LT)", "Maximum Dispersal Distance (MDD)"),
+  Brief_description= c(
+    "MH is a trait related to competition and colonization, since taller trees are expected to intercept more light, outcompeting smaller trees, as well as being able to disperse seeds over greater distances.",
+    "SM is related to plant colonization and establishment: larger seeds are related to smaller dispersal ability, but higher survival chance and establishment.", 
+    "High WD is associated to more resistance against pathogens, insects and reduces the chances of cavitation, an important cause of death in plants in dry forests (Chave et al. 2009). On the other hand, low wood density is associated to water storage efficiency in dry periods (Borchert 1994).",
+    "High SLA indicates thin and less dense leaf, generally associated to high metabolic rates, growth rate and short leaft life time. In dry forests, generally, species present lower SLA in poor soils than those species occurring in fertile soils (Pérez-Harguindeguy et al. 2013)",
+    "High LDMC indicates tough leaves, more resistant against physical damage (i.e. herbivory and wind) (Kitajima et al. 2012). On the other hand, low LDMC species are associated to high productivity and/or disturbed sites (Pérez-Harguindeguy et al. 2013).",
+    "High LT is associated to succulent plants and is a response to light intensity in sunnier, drier and less fertile habitats, as well as in longer-lived leaves",
+    "High MDD is generally linked to wind dispersed species with special structures or species dispersed by vertebrates, whereas ballistic or ant dispersal species have low MDD (Tamme et al. 2014)"
+  )
+)
+
+
+kable(text_tbl, caption = 'Brief description and functions of traits considered in the study.') %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+
+```
+
+```{r tab2}
+
+reg.adults<-r.adults %>% gather(sp, value) %>%
+  group_by(sp) %>% 
+  rename(Species = sp) %>% 
+  summarise(Abundance = sum(value)) %>% 
+  arrange(desc(Abundance)) %>% 
+  ungroup() %>% 
+   #mutate("Total Abundance" = sum(Abundance)) %>%  
+  slice(., 1:5) %>% 
+  mutate(Ontogeny = "Adults region (n = 35)")
+
+succ.adults<-r.adults.succ %>% gather(sp, value) %>%
+  group_by(sp) %>% 
+  rename(Species = sp) %>% 
+  summarise(Abundance = sum(value)) %>% 
+  arrange(desc(Abundance)) %>% 
+  ungroup() %>% 
+  #mutate("Total Abundance" = sum(Abundance)) %>% 
+  slice(., 1:5) %>% 
+  mutate(Ontogeny = "Adults succession (n = 15)")
+
+succ.seeds <- r.seeds %>% gather(sp, value) %>% 
+  group_by(sp) %>% 
+  rename(Species = sp) %>% 
+  summarise(Abundance = sum(value)) %>% 
+  arrange(desc(Abundance))%>% 
+  ungroup() %>% 
+  #mutate("Total Abundance" = sum(Abundance)) %>%  
+  slice(., 1:5) %>% 
+  mutate(Ontogeny = "Seeds")
+
+
+succ.seedl <- r.seedl %>% gather(sp, value) %>% 
+  group_by(sp) %>% 
+  rename(Species = sp) %>% 
+  summarise(Abundance = sum(value)) %>% 
+  arrange(desc(Abundance))%>% 
+  ungroup() %>% 
+  #mutate("Total Abundance" = sum(Abundance)) %>% 
+  slice(., 1:5) %>% 
+  mutate(Ontogeny = "Seedling")
+
+full.table<-reg.adults %>% 
+  bind_rows(succ.adults, succ.seeds, succ.seedl) %>% 
+  kable(escape = F, caption = "Five most abundant species found for each ontogeny in the Catimbau National Park, Brazil") %>%
+  kable_styling(c("striped", "bordered"))
+
+full.table
+```
